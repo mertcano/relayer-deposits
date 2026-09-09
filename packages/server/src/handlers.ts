@@ -32,7 +32,7 @@ type DepositRequestBody = {
  */
 const MAX_UINT256_HEX_LENGTH = 66;
 
-/* A 65-byte `(r, s, v)` signature is 130 hex digits after the `0x` prefix. */
+/* A 65-byte `(r, s, v)` signature is exactly 130 hex digits after the `0x` prefix. */
 const SIGNATURE_HEX_LENGTH = 132;
 
 const ADDRESS_REGEX = /^0x[0-9a-fA-F]{40}$/;
@@ -40,16 +40,6 @@ const HEX_REGEX = /^0x[0-9a-fA-F]+$/;
 
 /*
  * Validates the request body before any of it reaches ethers or the chain.
- *
- * The body previously arrived as `ctx.request.body as DepositRequestBody`. A
- * cast is a compile-time assertion only -- at runtime the body is whatever JSON
- * the client sent, so every field was unvalidated. `BigNumber.from(totalValue)`
- * with `totalValue: undefined` or `totalValue: {}` throws inside the handler and
- * surfaces as an unhandled 500 rather than the 400 this is, and the surrounding
- * `ctx.assert` checks silently read `undefined` as a valid comparison operand.
- *
- * Returns a human-readable reason on failure and `undefined` on success, so the
- * caller decides the response shape.
  */
 function validateDepositRequest(body: unknown): string | undefined {
     if (typeof body !== "object" || body === null || Array.isArray(body)) {
@@ -58,15 +48,24 @@ function validateDepositRequest(body: unknown): string | undefined {
 
     const candidate = body as Record<string, unknown>;
 
-    const requiredHexFields: Array<[string, number]> = [
-        ["receiveSig", SIGNATURE_HEX_LENGTH],
-        ["depositSig", SIGNATURE_HEX_LENGTH],
+    // Signatures must match exact 65-byte length (132 chars with 0x prefix)
+    for (const field of ["receiveSig", "depositSig"]) {
+        const value = candidate[field];
+        if (typeof value !== "string") return `\`${field}\` must be a hexstring`;
+        if (!HEX_REGEX.test(value)) return `\`${field}\` must be a 0x-prefixed hexstring`;
+        if (value.length !== SIGNATURE_HEX_LENGTH) {
+            return `\`${field}\` must be exactly ${SIGNATURE_HEX_LENGTH} characters`;
+        }
+    }
+
+    // Amount and uint256 hex fields bounded by maximum uint256 representation length
+    const boundedHexFields: Array<[string, number]> = [
         ["totalValue", MAX_UINT256_HEX_LENGTH],
         ["fee", MAX_UINT256_HEX_LENGTH],
         ["receiveNonce", MAX_UINT256_HEX_LENGTH],
     ];
 
-    for (const [field, maxLength] of requiredHexFields) {
+    for (const [field, maxLength] of boundedHexFields) {
         const value = candidate[field];
         if (typeof value !== "string") return `\`${field}\` must be a hexstring`;
         if (!HEX_REGEX.test(value)) return `\`${field}\` must be a 0x-prefixed hexstring`;
@@ -81,8 +80,7 @@ function validateDepositRequest(body: unknown): string | undefined {
     }
 
     // `validBefore` and `maxBlock` are compared against block numbers and
-    // timestamps on chain, so they must be non-negative safe integers. A
-    // fractional or NaN value would be encoded as an unpredictable uint256.
+    // timestamps on chain, so they must be non-negative safe integers.
     for (const field of ["validBefore", "maxBlock", "chainId"]) {
         const value = candidate[field];
         if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
@@ -118,7 +116,6 @@ export const handleDeposit = async (ctx, next) => {
 
     let signer: Signer;
     try {
-        // will throw on an unsupported chainId
         signer = await getSigner();
     } catch (_e) {
         ctx.throw(400, "Unsupported chainId " + chainId);
@@ -130,10 +127,6 @@ export const handleDeposit = async (ctx, next) => {
     try {
         receiveSig = splitSignature(receiveSigRaw);
     } catch (_e) {
-        // The upstream message is not echoed: it embeds the caller-supplied
-        // signature bytes, so reflecting it turns this endpoint into a mirror for
-        // arbitrary attacker-chosen content. The field name is enough to fix a
-        // malformed request.
         ctx.throw(400, "Error splitting `receiveSig`: not a valid signature");
     }
 
@@ -144,14 +137,11 @@ export const handleDeposit = async (ctx, next) => {
         ctx.throw(400, "Error splitting `depositSig`: not a valid signature");
     }
 
-    // check gas price is fast to prevent slow gas price from slowing deposits
     const { fee: calculatedFee } = await getFee();
 
-    // check that fee is acceptable
     const feeMin = calculatedFee.mul(90).div(100);
     ctx.assert(BigNumber.from(fee).gt(feeMin), 400, "Fee lower than minimum accepted fee.");
 
-    // estimate gas on transaction to check validity
     try {
         await depositContract.estimateGas.deposit(
             from,
@@ -165,9 +155,6 @@ export const handleDeposit = async (ctx, next) => {
             depositSig,
         );
     } catch (e) {
-        // Log the provider's reason server-side, where it is useful for
-        // debugging, but do not reflect it: an estimateGas revert reason can
-        // carry relayer configuration and provider URLs.
         console.error("Failed to estimate gas for deposit transaction:", e);
         ctx.throw(400, "Failed to estimate gas for deposit transaction. Transaction will likely fail.");
     }
@@ -175,11 +162,6 @@ export const handleDeposit = async (ctx, next) => {
     try {
         const isDefenderSetup = await getIsDefenderSetup();
 
-        // The nonce is reserved, used, and advanced as one atomic step. See
-        // NonceManager.withNonce for why the previous read-then-increment pair
-        // never advanced the nonce at all.
-        // `Contract` methods are untyped, so the transaction response is `any`
-        // here exactly as it was before this call was wrapped.
         const tx: any = await nonceManager.withNonce((nonce) => { // eslint-disable-line
             const txOptions = isDefenderSetup || nonce === undefined ? {} : { nonce };
 
@@ -217,10 +199,6 @@ export const handleDeposit = async (ctx, next) => {
         };
         ctx.status = 200;
     } catch (error) {
-        // `error.toString()` on an ethers error includes the full RPC request and
-        // response, which can contain the provider endpoint (with its API key in
-        // the path, as constructed in chains.ts) and the relayer's own address.
-        // Log it, return a generic message.
         console.error("Failed to submit deposit transaction:", error);
 
         ctx.body = {
@@ -228,4 +206,4 @@ export const handleDeposit = async (ctx, next) => {
         };
         ctx.status = 400;
     }
-}
+};

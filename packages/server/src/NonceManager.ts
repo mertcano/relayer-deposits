@@ -10,7 +10,7 @@ import { getIsDefenderSetup } from "./defender";
  *
  * The higher this threshold is the more transactions that will fail after a transaction is dropped.
  * The lower the threshold, the more likely it is that transactions will fail because there's many in the same block.
- * Ideally this threshold should be the maximum amound of transactions this relayer may send in a block.
+ * Ideally this threshold should be the maximum amount of transactions this relayer may send in a block.
  */
 const NONCE_STALE_THRESHOLD = 10;
 
@@ -35,15 +35,13 @@ export default class NonceManager {
     }
 
     async setNonce(): Promise<void> {
-        const current = await this.currentNonce();
-        // Offset by current timestamp to avoid duplicate nonces when restarted
-        this.nonce = Math.max(current, Math.floor(Date.now() / 1000));
+        this.nonce = await this.currentNonce();
     }
 
     async checkNonceFresh(): Promise<void> {
         const currentNonce = await this.currentNonce();
         if (this.nonce - NONCE_STALE_THRESHOLD > currentNonce || this.nonce < currentNonce) {
-            this.nonce = Math.max(currentNonce, Math.floor(Date.now() / 1000));
+            this.nonce = currentNonce;
         }
     }
 
